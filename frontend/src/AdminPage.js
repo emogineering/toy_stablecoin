@@ -110,9 +110,10 @@ function AdminPage() {
     }
   };
 
-  const handleReject = async (id) => {
+  const handleReject = async (id, type) => {
     try {
-      const res = await fetch(`http://localhost:8000/admin/reject-burn/${id}`, { method: 'POST' });
+      const endpoint = type === 'burn' ? `reject-burn/${id}` : `reject/${id}`;
+      const res = await fetch(`http://localhost:8000/admin/${endpoint}`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '거절 실패');
       // 즉시 데이터 새로고침
@@ -304,9 +305,7 @@ function AdminPage() {
                   {req.status === 'pending' ? (
                     <>
                       <button onClick={() => handleApprove(req.id, req.type)}>승인</button>
-                      {req.type === 'burn' && (
-                        <button onClick={() => handleReject(req.id)} style={{ marginLeft: 8 }}>거절</button>
-                      )}
+                      <button onClick={() => handleReject(req.id, req.type)} style={{ marginLeft: 8 }}>거절</button>
                     </>
                   ) : req.status === 'approved' ? '승인됨' : '거절됨'}
                 </td>

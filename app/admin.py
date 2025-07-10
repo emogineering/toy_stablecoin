@@ -140,6 +140,30 @@ def approve_request(request_id: int, db: Session = Depends(get_db)):
         logger.error(f"민팅 신청 승인 실패: {e}")
         raise HTTPException(status_code=500, detail="신청 승인 중 오류가 발생했습니다.")
 
+@router.post("/reject/{request_id}")
+def reject_request(request_id: int, db: Session = Depends(get_db)):
+    if request_id <= 0:
+        raise HTTPException(status_code=400, detail="유효하지 않은 신청 ID입니다.")
+    
+    try:
+        mint_req = db.query(MintRequest).filter(MintRequest.id == request_id).first()
+        if not mint_req:
+            raise HTTPException(status_code=404, detail="신청 내역을 찾을 수 없습니다.")
+        if str(mint_req.status) != "pending":
+            raise HTTPException(status_code=400, detail="이미 처리된 신청입니다.")
+        
+        setattr(mint_req, 'status', 'rejected')
+        db.commit()
+        db.refresh(mint_req)
+        logger.info(f"민팅 신청 거절: ID {request_id}")
+        return {"message": f"{request_id}번 신청이 거절되었습니다."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"민팅 신청 거절 실패: {e}")
+        raise HTTPException(status_code=500, detail="신청 거절 중 오류가 발생했습니다.")
+
 @router.post("/sync-upbit-transfers")
 def sync_upbit_transfers(db: Session = Depends(get_db)):
     try:
