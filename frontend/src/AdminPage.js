@@ -12,6 +12,7 @@ function AdminPage() {
   const [burnMsg, setBurnMsg] = useState('');
   const [burns, setBurns] = useState([]);
   const [balanceMsg, setBalanceMsg] = useState('');
+  const [syncMsg, setSyncMsg] = useState('');
 
   const fetchStats = async () => {
     try {
@@ -134,6 +135,22 @@ function AdminPage() {
     }
   };
 
+  const handleSyncUpbitTransfers = async () => {
+    setSyncMsg('');
+    try {
+      const res = await fetch('http://localhost:8000/admin/sync-upbit-transfers', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '동기화 실패');
+      setSyncMsg(data.message);
+      fetchTransfers();
+      fetchRequests();
+      fetchBurns();
+      fetchStats();
+    } catch (err) {
+      setSyncMsg(err.message);
+    }
+  };
+
   return (
     <div style={{ maxWidth: 700, margin: '40px auto', padding: 20, border: '1px solid #ccc', borderRadius: 8 }}>
       <h2>민팅 신청 목록 (관리자)</h2>
@@ -146,6 +163,8 @@ function AdminPage() {
         </div>
       )}
       <h2>입출금 내역 (업비트)</h2>
+      <button onClick={handleSyncUpbitTransfers} style={{ marginBottom: 10 }}>업비트 전송 동기화</button>
+      {syncMsg && <div style={{ margin: '8px 0', color: syncMsg.includes('실패') ? 'red' : 'green' }}>{syncMsg}</div>}
       <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 30 }}>
         <thead>
           <tr>
