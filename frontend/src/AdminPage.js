@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 
 function AdminPage() {
-  const [requests, setRequests] = useState([]);
+  const [allRequests, setAllRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [approveMsg, setApproveMsg] = useState('');
@@ -10,7 +10,6 @@ function AdminPage() {
   const [burnAmount, setBurnAmount] = useState('');
   const [burnMemo, setBurnMemo] = useState('');
   const [burnMsg, setBurnMsg] = useState('');
-  const [burns, setBurns] = useState([]);
   const [balanceMsg, setBalanceMsg] = useState('');
   const [syncMsg, setSyncMsg] = useState('');
 
@@ -24,13 +23,13 @@ function AdminPage() {
     }
   };
 
-  const fetchRequests = async () => {
+  const fetchAllRequests = async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('http://localhost:8000/admin/mint-requests');
+      const res = await fetch('http://localhost:8000/admin/all-requests');
       const data = await res.json();
-      setRequests(data);
+      setAllRequests(data);
     } catch (err) {
       setError('목록 불러오기 실패');
     }
@@ -47,33 +46,36 @@ function AdminPage() {
     }
   };
 
-  const fetchBurns = async () => {
-    try {
-      const res = await fetch('http://localhost:8000/admin/burn-requests');
-      const data = await res.json();
-      setBurns(data);
-    } catch (err) {
-      setBurns([]);
-    }
-  };
-
   useEffect(() => {
     fetchStats();
-    fetchRequests();
+    fetchAllRequests();
     fetchTransfers();
-    fetchBurns();
   }, []);
 
-  const handleApprove = async (id) => {
+  const handleApprove = async (id, type) => {
     setApproveMsg('');
     try {
-      const res = await fetch(`http://localhost:8000/admin/approve/${id}`, { method: 'POST' });
+      const endpoint = type === 'burn' ? `approve-burn/${id}` : `approve/${id}`;
+      const res = await fetch(`http://localhost:8000/admin/${endpoint}`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '승인 실패');
       setApproveMsg(data.message);
-      fetchRequests();
+      fetchAllRequests();
+      fetchStats();
     } catch (err) {
       setApproveMsg(err.message);
+    }
+  };
+
+  const handleReject = async (id) => {
+    try {
+      const res = await fetch(`http://localhost:8000/admin/reject-burn/${id}`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '거절 실패');
+      fetchAllRequests();
+      fetchStats();
+    } catch (err) {
+      alert(err.message);
     }
   };
 
@@ -91,32 +93,9 @@ function AdminPage() {
       setBurnMsg('소각 신청 완료!');
       setBurnAmount('');
       setBurnMemo('');
-      fetchTransfers();
+      fetchAllRequests();
     } catch (err) {
       setBurnMsg(err.message);
-    }
-  };
-
-  const handleApproveBurn = async (id) => {
-    try {
-      const res = await fetch(`http://localhost:8000/admin/approve-burn/${id}`, { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || '승인 실패');
-      fetchBurns();
-      fetchStats();
-    } catch (err) {
-      alert(err.message);
-    }
-  };
-  const handleRejectBurn = async (id) => {
-    try {
-      const res = await fetch(`http://localhost:8000/admin/reject-burn/${id}`, { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || '거절 실패');
-      fetchBurns();
-      fetchStats();
-    } catch (err) {
-      alert(err.message);
     }
   };
 
@@ -127,8 +106,7 @@ function AdminPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '잔액 변화 감지 실패');
       setBalanceMsg(data.message);
-      fetchRequests();
-      fetchBurns();
+      fetchAllRequests();
       fetchStats();
     } catch (err) {
       setBalanceMsg(err.message);
@@ -143,8 +121,7 @@ function AdminPage() {
       if (!res.ok) throw new Error(data.detail || '동기화 실패');
       setSyncMsg(data.message);
       fetchTransfers();
-      fetchRequests();
-      fetchBurns();
+      fetchAllRequests();
       fetchStats();
     } catch (err) {
       setSyncMsg(err.message);
@@ -152,8 +129,8 @@ function AdminPage() {
   };
 
   return (
-    <div style={{ maxWidth: 700, margin: '40px auto', padding: 20, border: '1px solid #ccc', borderRadius: 8 }}>
-      <h2>민팅 신청 목록 (관리자)</h2>
+    <div style={{ maxWidth: 1000, margin: '40px auto', padding: 20, border: '1px solid #ccc', borderRadius: 8 }}>
+      <h2>관리자 대시보드</h2>
       {stats && (
         <div style={{ marginBottom: 20, padding: 10, background: '#f8f8f8', borderRadius: 6 }}>
           <b>계좌 USDT 잔액:</b> {stats.usdt_balance !== undefined ? Number(stats.usdt_balance).toFixed(6) : '-'} USDT<br/>
@@ -162,6 +139,7 @@ function AdminPage() {
           <b>현재 유통중인 USDG:</b> {stats.circulating_usdg !== undefined ? Number(stats.circulating_usdg).toFixed(6) : '-'} USDG
         </div>
       )}
+      
       <h2>입출금 내역 (업비트)</h2>
       <button onClick={handleSyncUpbitTransfers} style={{ marginBottom: 10 }}>업비트 전송 동기화</button>
       {syncMsg && <div style={{ margin: '8px 0', color: syncMsg.includes('실패') ? 'red' : 'green' }}>{syncMsg}</div>}
@@ -184,33 +162,52 @@ function AdminPage() {
           ))}
         </tbody>
       </table>
-      <h2>소각 신청 목록</h2>
-      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 30 }}>
-        <thead>
-          <tr>
-            <th>ID</th><th>금액</th><th>트랜잭션ID/메모</th><th>상태</th><th>신청일시</th><th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {burns.map(burn => (
-            <tr key={burn.id}>
-              <td>{burn.id}</td>
-              <td>{Number(burn.amount).toFixed(6)}</td>
-              <td>{burn.tx_id}</td>
-              <td>{burn.status}</td>
-              <td>{burn.created_at ? new Date(new Date(burn.created_at).getTime() + 9 * 60 * 60 * 1000).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) : '-'}</td>
-              <td>
-                {burn.status === 'pending' ? (
-                  <>
-                    <button onClick={() => handleApproveBurn(burn.id)}>승인</button>
-                    <button onClick={() => handleRejectBurn(burn.id)} style={{ marginLeft: 8 }}>거절</button>
-                  </>
-                ) : burn.status === 'approved' ? '승인됨' : '거절됨'}
-              </td>
+
+      <h2>민팅/소각 신청 목록</h2>
+      {loading ? <div>불러오는 중...</div> : error ? <div style={{ color: 'red' }}>{error}</div> : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 30 }}>
+          <thead>
+            <tr>
+              <th>ID</th><th>타입</th><th>금액</th><th>지갑주소/메모</th><th>상태</th><th>신청일시</th><th>Action</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {allRequests.map(req => (
+              <tr key={`${req.type}-${req.id}`}>
+                <td>{req.id}</td>
+                <td>
+                  <span style={{ 
+                    padding: '4px 8px', 
+                    borderRadius: '4px', 
+                    fontSize: '0.9em',
+                    backgroundColor: req.type === 'mint' ? '#e3f2fd' : '#ffebee',
+                    color: req.type === 'mint' ? '#1976d2' : '#d32f2f'
+                  }}>
+                    {req.type === 'mint' ? '민팅' : '소각'}
+                  </span>
+                </td>
+                <td>{Number(req.amount).toFixed(6)}</td>
+                <td style={{ fontSize: '0.9em' }}>
+                  {req.type === 'mint' ? (req.eth_address || '-') : (req.tx_id || '-')}
+                </td>
+                <td>{req.status}</td>
+                <td>{req.created_at ? new Date(new Date(req.created_at).getTime() + 9 * 60 * 60 * 1000).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) : '-'}</td>
+                <td>
+                  {req.status === 'pending' ? (
+                    <>
+                      <button onClick={() => handleApprove(req.id, req.type)}>승인</button>
+                      {req.type === 'burn' && (
+                        <button onClick={() => handleReject(req.id)} style={{ marginLeft: 8 }}>거절</button>
+                      )}
+                    </>
+                  ) : req.status === 'approved' ? '승인됨' : '거절됨'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
       <div style={{ margin: '30px 0', padding: 10, background: '#f3f3f3', borderRadius: 6 }}>
         <h3>임의 소각 신청</h3>
         <form onSubmit={handleManualBurn} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -220,38 +217,15 @@ function AdminPage() {
         </form>
         {burnMsg && <div style={{ marginTop: 8, color: burnMsg.includes('완료') ? 'green' : 'red' }}>{burnMsg}</div>}
       </div>
+
       <div style={{ margin: '30px 0', padding: 10, background: '#f3f3f3', borderRadius: 6 }}>
         <h3>잔액 변화 감지</h3>
         <button onClick={handleCheckBalanceChange}>잔액 변화 확인</button>
         {balanceMsg && <div style={{ marginTop: 8, color: balanceMsg.includes('감지') ? 'green' : 'blue' }}>{balanceMsg}</div>}
       </div>
-      {loading ? <div>불러오는 중...</div> : error ? <div style={{ color: 'red' }}>{error}</div> : (
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              <th>ID</th><th>Address</th><th>Amount</th><th>Status</th><th>신청일시</th><th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {requests.map(req => (
-              <tr key={req.id}>
-                <td>{req.id}</td>
-                <td>{req.eth_address}</td>
-                <td>{req.amount}</td>
-                <td>{req.status}</td>
-                <td>{req.created_at ? new Date(new Date(req.created_at).getTime() + 9 * 60 * 60 * 1000).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) : '-'}</td>
-                <td>
-                  {req.status === 'pending' ? (
-                    <button onClick={() => handleApprove(req.id)}>승인</button>
-                  ) : '완료'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+
       {approveMsg && <div style={{ marginTop: 20, color: approveMsg.includes('실패') ? 'red' : 'green' }}>{approveMsg}</div>}
-      <button style={{ marginTop: 20 }} onClick={fetchRequests}>새로고침</button>
+      <button style={{ marginTop: 20 }} onClick={fetchAllRequests}>새로고침</button>
     </div>
   );
 }

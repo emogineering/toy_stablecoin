@@ -74,6 +74,48 @@ def get_requests(db: Session = Depends(get_db)):
         logger.error(f"민팅 신청 목록 조회 실패: {e}")
         raise HTTPException(status_code=500, detail="민팅 신청 목록 조회 중 오류가 발생했습니다.")
 
+@router.get("/all-requests")
+def get_all_requests(db: Session = Depends(get_db)):
+    try:
+        # 민팅 신청과 소각 신청을 모두 가져와서 통합
+        mint_requests = db.query(MintRequest).all()
+        burn_requests = db.query(BurnRequest).all()
+        
+        # 통합된 리스트 생성
+        all_requests = []
+        
+        # 민팅 신청 추가
+        for req in mint_requests:
+            all_requests.append({
+                "id": req.id,
+                "type": "mint",  # 민팅 타입
+                "amount": req.amount,
+                "eth_address": req.eth_address,
+                "tx_id": req.tx_id,
+                "status": req.status,
+                "created_at": req.created_at
+            })
+        
+        # 소각 신청 추가
+        for req in burn_requests:
+            all_requests.append({
+                "id": req.id,
+                "type": "burn",  # 소각 타입
+                "amount": req.amount,
+                "eth_address": None,  # 소각은 주소가 없음
+                "tx_id": req.tx_id,
+                "status": req.status,
+                "created_at": req.created_at
+            })
+        
+        # 생성일시 기준으로 내림차순 정렬
+        all_requests.sort(key=lambda x: x["created_at"], reverse=True)
+        
+        return all_requests
+    except Exception as e:
+        logger.error(f"통합 신청 목록 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail="신청 목록 조회 중 오류가 발생했습니다.")
+
 @router.post("/approve/{request_id}")
 def approve_request(request_id: int, db: Session = Depends(get_db)):
     if request_id <= 0:
