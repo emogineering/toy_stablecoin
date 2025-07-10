@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 
 function AdminPage() {
   const [allRequests, setAllRequests] = useState([]);
@@ -10,47 +10,89 @@ function AdminPage() {
   const [burnAmount, setBurnAmount] = useState('');
   const [burnMemo, setBurnMemo] = useState('');
   const [burnMsg, setBurnMsg] = useState('');
-  const [balanceMsg, setBalanceMsg] = useState('');
   const [syncMsg, setSyncMsg] = useState('');
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [balanceChange, setBalanceChange] = useState(null);
+  const previousBalance = useRef(null);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const res = await fetch('http://localhost:8000/admin/dashboard-stats');
       const data = await res.json();
+      
+      // 잔액 변화 계산
+      if (previousBalance.current !== null && data.usdt_balance !== undefined) {
+        const change = data.usdt_balance - previousBalance.current;
+        if (Math.abs(change) > 0.000001) { // 0.000001 USDT 이상 변화가 있을 때만 표시
+          setBalanceChange({
+            amount: change,
+            timestamp: new Date()
+          });
+        } else {
+          setBalanceChange(null);
+        }
+      }
+      
+      previousBalance.current = data.usdt_balance;
       setStats(data);
     } catch (err) {
-      setStats(null);
+      console.log('통계 업데이트 실패:', err);
     }
-  };
+  }, []);
 
-  const fetchAllRequests = async () => {
-    setLoading(true);
-    setError(null);
+  const fetchAllRequests = useCallback(async () => {
     try {
       const res = await fetch('http://localhost:8000/admin/all-requests');
       const data = await res.json();
       setAllRequests(data);
+      setLastUpdate(new Date());
     } catch (err) {
-      setError('목록 불러오기 실패');
+      console.log('신청 목록 업데이트 실패:', err);
     }
-    setLoading(false);
-  };
+  }, []);
 
-  const fetchTransfers = async () => {
+  const fetchTransfers = useCallback(async () => {
     try {
       const res = await fetch('http://localhost:8000/admin/upbit-transfers');
       const data = await res.json();
       setTransfers(data);
     } catch (err) {
-      setTransfers([]);
+      console.log('입출금 내역 업데이트 실패:', err);
     }
-  };
-
-  useEffect(() => {
-    fetchStats();
-    fetchAllRequests();
-    fetchTransfers();
   }, []);
+
+  // 초기 로딩
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    
+    const initialLoad = async () => {
+      try {
+        await Promise.all([
+          fetchStats(),
+          fetchAllRequests(),
+          fetchTransfers()
+        ]);
+      } catch (err) {
+        setError('초기 데이터 로딩 실패');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    initialLoad();
+  }, [fetchStats, fetchAllRequests, fetchTransfers]);
+
+  // 자동 새로고침 (5초마다)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchStats();
+      fetchAllRequests();
+      fetchTransfers();
+    }, 5000); // 5초마다 업데이트
+
+    return () => clearInterval(interval);
+  }, [fetchStats, fetchAllRequests, fetchTransfers]);
 
   const handleApprove = async (id, type) => {
     setApproveMsg('');
@@ -60,6 +102,7 @@ function AdminPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '승인 실패');
       setApproveMsg(data.message);
+      // 즉시 데이터 새로고침
       fetchAllRequests();
       fetchStats();
     } catch (err) {
@@ -72,6 +115,7 @@ function AdminPage() {
       const res = await fetch(`http://localhost:8000/admin/reject-burn/${id}`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '거절 실패');
+      // 즉시 데이터 새로고침
       fetchAllRequests();
       fetchStats();
     } catch (err) {
@@ -93,23 +137,10 @@ function AdminPage() {
       setBurnMsg('소각 신청 완료!');
       setBurnAmount('');
       setBurnMemo('');
+      // 즉시 데이터 새로고침
       fetchAllRequests();
     } catch (err) {
       setBurnMsg(err.message);
-    }
-  };
-
-  const handleCheckBalanceChange = async () => {
-    setBalanceMsg('');
-    try {
-      const res = await fetch('http://localhost:8000/admin/check-balance-change', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || '잔액 변화 감지 실패');
-      setBalanceMsg(data.message);
-      fetchAllRequests();
-      fetchStats();
-    } catch (err) {
-      setBalanceMsg(err.message);
     }
   };
 
@@ -120,6 +151,7 @@ function AdminPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '동기화 실패');
       setSyncMsg(data.message);
+      // 즉시 데이터 새로고침
       fetchTransfers();
       fetchAllRequests();
       fetchStats();
@@ -128,12 +160,75 @@ function AdminPage() {
     }
   };
 
+  const handleManualRefresh = async () => {
+    console.log('수동 새로고침 시작');
+    try {
+      // 로딩 상태 표시
+      setLoading(true);
+      
+      // 모든 데이터를 병렬로 새로고침
+      await Promise.all([
+        fetchStats(),
+        fetchAllRequests(),
+        fetchTransfers()
+      ]);
+      
+      console.log('수동 새로고침 완료');
+    } catch (err) {
+      console.error('수동 새로고침 실패:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 잔액 변화 표시 컴포넌트
+  const BalanceChangeDisplay = () => {
+    if (!balanceChange) {
+      return <span style={{ color: '#666', fontSize: '0.9em' }}> (변화 없음)</span>;
+    }
+    
+    const isPositive = balanceChange.amount > 0;
+    const color = isPositive ? '#4CAF50' : '#f44336';
+    const sign = isPositive ? '+' : '';
+    
+    return (
+      <span style={{ color, fontSize: '0.9em', fontWeight: 'bold' }}>
+        {' '}({sign}{balanceChange.amount.toFixed(6)} USDT)
+        <span style={{ color: '#666', fontSize: '0.8em' }}>
+          {' '}• {balanceChange.timestamp.toLocaleTimeString('ko-KR')}
+        </span>
+      </span>
+    );
+  };
+
   return (
     <div style={{ maxWidth: 1000, margin: '40px auto', padding: 20, border: '1px solid #ccc', borderRadius: 8 }}>
       <h2>관리자 대시보드</h2>
+      
+      {/* 실시간 업데이트 상태 표시 */}
+      <div style={{ 
+        marginBottom: 10, 
+        padding: '8px 12px', 
+        background: '#e8f5e8', 
+        borderRadius: 4, 
+        fontSize: '0.9em',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center'
+      }}>
+        <span>🔄 실시간 업데이트 활성화 (5초마다 자동 새로고침)</span>
+        {lastUpdate && (
+          <span style={{ color: '#666' }}>
+            마지막 업데이트: {lastUpdate.toLocaleTimeString('ko-KR')}
+          </span>
+        )}
+      </div>
+
       {stats && (
         <div style={{ marginBottom: 20, padding: 10, background: '#f8f8f8', borderRadius: 6 }}>
-          <b>계좌 USDT 잔액:</b> {stats.usdt_balance !== undefined ? Number(stats.usdt_balance).toFixed(6) : '-'} USDT<br/>
+          <b>계좌 USDT 잔액:</b> {stats.usdt_balance !== undefined ? Number(stats.usdt_balance).toFixed(6) : '-'} USDT
+          <BalanceChangeDisplay />
+          <br/>
           <b>총 민팅된 USDG:</b> {stats.total_usdg_minted} USDG<br/>
           <b>총 소각된 USDG:</b> {stats.total_usdg_burned} USDG<br/>
           <b>현재 유통중인 USDG:</b> {stats.circulating_usdg !== undefined ? Number(stats.circulating_usdg).toFixed(6) : '-'} USDG
@@ -141,7 +236,20 @@ function AdminPage() {
       )}
       
       <h2>입출금 내역 (업비트)</h2>
-      <button onClick={handleSyncUpbitTransfers} style={{ marginBottom: 10 }}>업비트 전송 동기화</button>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 10, alignItems: 'center' }}>
+        <button onClick={handleSyncUpbitTransfers}>업비트 전송 동기화</button>
+        <button 
+          onClick={handleManualRefresh} 
+          disabled={loading}
+          style={{ 
+            background: loading ? '#ccc' : '#4CAF50', 
+            color: 'white',
+            cursor: loading ? 'not-allowed' : 'pointer'
+          }}
+        >
+          {loading ? '🔄 새로고침 중...' : '🔄 수동 새로고침'}
+        </button>
+      </div>
       {syncMsg && <div style={{ margin: '8px 0', color: syncMsg.includes('실패') ? 'red' : 'green' }}>{syncMsg}</div>}
       <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 30 }}>
         <thead>
@@ -218,14 +326,7 @@ function AdminPage() {
         {burnMsg && <div style={{ marginTop: 8, color: burnMsg.includes('완료') ? 'green' : 'red' }}>{burnMsg}</div>}
       </div>
 
-      <div style={{ margin: '30px 0', padding: 10, background: '#f3f3f3', borderRadius: 6 }}>
-        <h3>잔액 변화 감지</h3>
-        <button onClick={handleCheckBalanceChange}>잔액 변화 확인</button>
-        {balanceMsg && <div style={{ marginTop: 8, color: balanceMsg.includes('감지') ? 'green' : 'blue' }}>{balanceMsg}</div>}
-      </div>
-
       {approveMsg && <div style={{ marginTop: 20, color: approveMsg.includes('실패') ? 'red' : 'green' }}>{approveMsg}</div>}
-      <button style={{ marginTop: 20 }} onClick={fetchAllRequests}>새로고침</button>
     </div>
   );
 }
