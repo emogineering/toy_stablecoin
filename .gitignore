@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 test.db
 .env
+.db
 
