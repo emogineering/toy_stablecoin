@@ -1,18 +1,167 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
-from app.models import MintRequest, UpbitTransfer, BurnRequest, get_db, UpbitBalanceHistory
+from app.models import MintRequest, UpbitTransfer, BurnRequest, get_db, UpbitBalanceHistory, UpbitTradeSync
 from sqlalchemy import func
 from app.upbit_api import get_usdt_balance
 from app.upbit_api import get_transfers
-from datetime import datetime
+from app.upbit_api import get_usdt_trades
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, validator
 from typing import Optional
 import logging
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # 로깅 설정
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+scheduler = None
+
+# 거래 체결 폴링 백오프용 전역 변수
+trade_poll_backoff_until = None
+
+
+def start_scheduler():
+    global scheduler
+    if scheduler is None:
+        scheduler = BackgroundScheduler()
+        
+        def scheduled_balance_check():
+            try:
+                db = next(get_db())
+                try:
+                    check_balance_change(db)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.error(f"스케줄된 잔액 체크 중 오류: {e}")
+        
+        def scheduled_trade_poll():
+            from datetime import datetime, timezone, timedelta
+            global trade_poll_backoff_until
+            now = datetime.now(timezone(timedelta(hours=9)))
+            if trade_poll_backoff_until and now < trade_poll_backoff_until:
+                logger.warning(f"[TRADE_POLL] 백오프 적용 중: {trade_poll_backoff_until}까지 폴링 일시 중지")
+                return
+            try:
+                db = next(get_db())
+                try:
+                    poll_upbit_trades_and_trigger_mint_burn(db)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.error(f"스케줄된 거래 체결 폴링 중 오류: {e}")
+                # 403 Forbidden 등 에러 발생 시 5분간 백오프
+                if '403' in str(e):
+                    trade_poll_backoff_until = now + timedelta(minutes=5)
+                    logger.warning(f"[TRADE_POLL] 403 에러 발생, 5분간 폴링 중지: {trade_poll_backoff_until}")
+        
+        scheduler.add_job(scheduled_balance_check, 'interval', seconds=5)
+        scheduler.add_job(scheduled_trade_poll, 'interval', seconds=60)  # 60초마다 거래 체결 폴링
+        scheduler.start()
+
+def poll_upbit_trades_and_trigger_mint_burn(db: Session):
+    """업비트 거래 체결 내역을 폴링하여 새로운 매수/매도에 따라 민팅/소각 신청을 자동 생성한다."""
+    try:
+        # 1. 마지막으로 처리한 체결 UUID 조회
+        sync_record = db.query(UpbitTradeSync).first()
+        last_processed_uuid = None
+        if sync_record and hasattr(sync_record, 'last_trade_uuid') and sync_record.last_trade_uuid:
+            last_processed_uuid = sync_record.last_trade_uuid
+        
+        # 2. 최근 거래 체결 내역 조회
+        trades = get_usdt_trades()
+        logger.info(f"[TRADE_POLL] 조회된 체결 내역: {len(trades)}건")
+        
+        if not trades:
+            logger.info("[TRADE_POLL] 처리할 체결 내역이 없습니다.")
+            return
+        
+        # 3. 마지막 처리 UUID 이후의 새로운 체결만 필터링
+        new_trades = []
+        if last_processed_uuid:
+            for trade in trades:
+                if trade['uuid'] != last_processed_uuid:
+                    new_trades.append(trade)
+                else:
+                    break  # 마지막 처리 UUID를 만나면 중단
+        else:
+            # 첫 실행인 경우 가장 최근 체결 1건만 처리 (초기 동기화 방지)
+            new_trades = trades[:1] if trades else []
+        
+        if not new_trades:
+            logger.info("[TRADE_POLL] 새로운 체결 내역이 없습니다.")
+            return
+        
+        logger.info(f"[TRADE_POLL] 새로운 체결 내역: {len(new_trades)}건")
+        
+        # 4. 각 체결에 따라 민팅/소각 신청 생성
+        latest_uuid = None
+        for trade in new_trades:
+            latest_uuid = trade['uuid']
+            side = trade['side']  # bid(매수), ask(매도)
+            volume = trade['volume']  # USDT 수량
+            price = trade['price']  # KRW 가격
+            created_at = trade['created_at']
+            
+            logger.info(f"[TRADE_POLL] 체결 처리: {side}, 수량: {volume} USDT, 가격: {price} KRW")
+            
+            if side == 'bid':  # 매수 = USDT 증가 = 민팅 신청
+                # 중복 체크: 최근 1시간 내 동일한 체결 UUID로 생성된 민팅 신청이 있는지 확인
+                existing_mint = db.query(MintRequest).filter(
+                    MintRequest.tx_id == f"trade_{latest_uuid}",
+                    MintRequest.status.in_(["pending", "approved"]),
+                    MintRequest.created_at >= (datetime.now(timezone(timedelta(hours=9))) - timedelta(hours=1))
+                ).first()
+                
+                if not existing_mint:
+                    db.add(MintRequest(
+                        eth_address="",
+                        amount=volume,
+                        tx_id=f"trade_{latest_uuid}",
+                        status="pending"
+                    ))
+                    logger.info(f"[TRADE_POLL] 매수 체결로 인한 민팅 신청 생성: {volume} USDT, tx_id=trade_{latest_uuid}")
+                else:
+                    logger.info(f"[TRADE_POLL] 이미 처리된 매수 체결: {latest_uuid}")
+            
+            elif side == 'ask':  # 매도 = USDT 감소 = 소각 신청
+                # 중복 체크: 최근 1시간 내 동일한 체결 UUID로 생성된 소각 신청이 있는지 확인
+                existing_burn = db.query(BurnRequest).filter(
+                    BurnRequest.tx_id == f"trade_{latest_uuid}",
+                    BurnRequest.status.in_(["pending", "approved"]),
+                    BurnRequest.created_at >= (datetime.now(timezone(timedelta(hours=9))) - timedelta(hours=1))
+                ).first()
+                
+                if not existing_burn:
+                    db.add(BurnRequest(
+                        amount=volume,
+                        tx_id=f"trade_{latest_uuid}",
+                        status="pending"
+                    ))
+                    logger.info(f"[TRADE_POLL] 매도 체결로 인한 소각 신청 생성: {volume} USDT, tx_id=trade_{latest_uuid}")
+                else:
+                    logger.info(f"[TRADE_POLL] 이미 처리된 매도 체결: {latest_uuid}")
+        
+        # 5. 마지막 처리 UUID 갱신
+        if latest_uuid:
+            if sync_record:
+                setattr(sync_record, 'last_trade_uuid', latest_uuid)
+                setattr(sync_record, 'last_checked_at', datetime.now(timezone(timedelta(hours=9))))
+            else:
+                db.add(UpbitTradeSync(
+                    last_trade_uuid=latest_uuid,
+                    last_checked_at=datetime.now(timezone(timedelta(hours=9)))
+                ))
+            
+            db.commit()
+            logger.info(f"[TRADE_POLL] 마지막 처리 UUID 갱신: {latest_uuid}")
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[TRADE_POLL] 거래 체결 폴링 중 오류 발생: {e}")
+        raise
 
 # 입력값 검증을 위한 Pydantic 모델
 class ManualBurnRequest(BaseModel):
@@ -65,6 +214,7 @@ def on_startup():
         initial_sync_if_needed(db)
     finally:
         db.close()
+    start_scheduler()
 
 @router.get("/mint-requests")
 def get_requests(db: Session = Depends(get_db)):
@@ -168,6 +318,7 @@ def reject_request(request_id: int, db: Session = Depends(get_db)):
 def sync_upbit_transfers(db: Session = Depends(get_db)):
     try:
         transfers = get_transfers()
+        logger.info(f"[SYNC] 업비트 입출금 내역: {transfers}")
         new_count = 0
         mint_count = 0
         burn_count = 0
@@ -176,12 +327,10 @@ def sync_upbit_transfers(db: Session = Depends(get_db)):
             if not isinstance(t, dict):
                 logger.warning(f"유효하지 않은 전송 데이터: {t}")
                 continue
-                
             tx_id = t.get("tx_id")
             if not tx_id:
-                logger.warning("tx_id가 없는 전송 데이터 건너뜀")
+                logger.warning(f"tx_id가 없는 전송 데이터 건너뜀: {t}")
                 continue
-                
             exists = db.query(UpbitTransfer).filter(UpbitTransfer.tx_id == tx_id).first()
             if not exists:
                 try:
@@ -195,6 +344,7 @@ def sync_upbit_transfers(db: Session = Depends(get_db)):
                     )
                     db.add(upbit_tx)
                     new_count += 1
+                    logger.info(f"[SYNC] UpbitTransfer 저장: {upbit_tx}")
                     # 입금이면 민팅 신청 생성 (중복 체크)
                     if t.get("type") == "deposit":
                         amount = t.get("amount", 0)
@@ -212,6 +362,11 @@ def sync_upbit_transfers(db: Session = Depends(get_db)):
                                     status="pending"
                                 ))
                                 mint_count += 1
+                                logger.info(f"[SYNC] MintRequest 생성: amount={amount}, tx_id={tx_id}")
+                            else:
+                                logger.warning(f"[SYNC] 중복 민팅 신청 감지: amount={amount}, tx_id={tx_id}")
+                        else:
+                            logger.warning(f"[SYNC] 0 이하 금액의 입금 민팅 무시: {t}")
                     # 출금이면 소각 신청 생성 (중복 체크)
                     elif t.get("type") == "withdraw":
                         amount = t.get("amount", 0)
@@ -228,10 +383,14 @@ def sync_upbit_transfers(db: Session = Depends(get_db)):
                                     status="pending"
                                 ))
                                 burn_count += 1
+                                logger.info(f"[SYNC] BurnRequest 생성: amount={amount}, tx_id={tx_id}")
+                            else:
+                                logger.warning(f"[SYNC] 중복 소각 신청 감지: amount={amount}, tx_id={tx_id}")
+                        else:
+                            logger.warning(f"[SYNC] 0 이하 금액의 출금 소각 무시: {t}")
                 except Exception as e:
                     logger.error(f"전송 데이터 처리 실패: {e}, 데이터: {t}")
                     continue
-        
         db.commit()
         logger.info(f"업비트 전송 동기화 완료: {new_count}건의 입출금 내역, {mint_count}건의 민팅 신청, {burn_count}건의 소각 신청")
         return {"message": f"{new_count}건의 입출금 내역, {mint_count}건의 민팅 신청, {burn_count}건의 소각 신청이 생성되었습니다."}
@@ -331,12 +490,19 @@ def dashboard_stats(db: Session = Depends(get_db)):
         
         usdt_balance = get_usdt_balance()
         circulating = total_minted - total_burned
-        
+
+        # 24시간 변화량 계산
+        now = datetime.now(timezone(timedelta(hours=9)))  # KST
+        since = now - timedelta(hours=24)
+        history = db.query(UpbitBalanceHistory).filter(UpbitBalanceHistory.created_at >= since).all()
+        last_24h_balance_change = sum([float(h.change_amount) for h in history]) if len(history) > 0 else 0.0
+
         return {
             "usdt_balance": usdt_balance,
             "total_usdg_minted": total_minted,
             "total_usdg_burned": total_burned,
-            "circulating_usdg": circulating
+            "circulating_usdg": circulating,
+            "last_24h_balance_change": last_24h_balance_change
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"통계 조회 중 오류 발생: {str(e)}")
@@ -345,21 +511,17 @@ def dashboard_stats(db: Session = Depends(get_db)):
 def check_balance_change(db: Session = Depends(get_db)):
     try:
         current_balance = get_usdt_balance()
-        
-        # 가장 최근 잔액 기록 조회
+        logger.info(f"[BALANCE] 현재 USDT 잔액: {current_balance}")
         last_record = db.query(UpbitBalanceHistory).order_by(UpbitBalanceHistory.created_at.desc()).first()
-        
         if last_record and hasattr(last_record, 'usdt_balance') and last_record.usdt_balance is not None:
             previous_balance = float(last_record.usdt_balance)
             change_amount = current_balance - previous_balance
-            
-            # 변화가 있는 경우에만 처리
-            if abs(change_amount) > 0.000001:  # 최소 변화량 임계값
-                # 입출금 내역으로 설명되는지 확인
+            logger.info(f"[BALANCE] 이전 잔액: {previous_balance}, 변화량: {change_amount}")
+            if abs(change_amount) > 0.000001:
+                now = datetime.now(timezone(timedelta(hours=9)))  # KST
                 recent_transfers = db.query(UpbitTransfer).filter(
                     UpbitTransfer.created_at > last_record.created_at
                 ).all()
-                
                 transfer_sum = 0.0
                 for t in recent_transfers:
                     if hasattr(t, 'amount') and t.amount is not None:
@@ -368,52 +530,100 @@ def check_balance_change(db: Session = Depends(get_db)):
                             transfer_sum += amount_val
                         else:
                             transfer_sum -= amount_val
-                
-                # 입출금으로 설명되지 않는 변화 = 거래로 인한 변화
                 unexplained_change = change_amount - transfer_sum
-                
+                logger.info(f"[BALANCE] 입출금으로 설명되지 않는 변화: {unexplained_change}")
                 if abs(unexplained_change) > 0.000001:
-                    # 거래로 인한 변화로 민팅/소각 신청 생성
                     if unexplained_change > 0:
-                        # USDT 증가 = 민팅 신청
-                        db.add(MintRequest(
-                            eth_address="",  # 거래로 인한 증가는 주소 없음
-                            amount=unexplained_change,
-                            status="pending"
-                        ))
-                        change_type = "trade_mint"
+                        # USDT 증가 = 민팅 신청 (중복 체크 추가)
+                        # 최근 1시간 내에 같은 금액의 trade_mint 민팅 신청이 있는지 확인
+                        recent_mint = db.query(MintRequest).filter(
+                            MintRequest.amount == unexplained_change,
+                            MintRequest.tx_id.is_(None),  # tx_id가 없는 trade_mint
+                            MintRequest.status.in_(["pending", "approved"]),
+                            MintRequest.created_at >= (now - timedelta(hours=1))
+                        ).first()
+                        
+                        if not recent_mint:
+                            db.add(MintRequest(
+                                eth_address="",
+                                amount=unexplained_change,
+                                status="pending"
+                            ))
+                            logger.info(f"[BALANCE] 입출금 내역으로 설명되지 않는 민팅 자동 생성: amount={unexplained_change}, tx_id 없음")
+                            change_type = "trade_mint"
+                        else:
+                            logger.info(f"[BALANCE] 최근 1시간 내 동일한 trade_mint 민팅 신청 존재: amount={unexplained_change}")
+                            change_type = "trade_mint_duplicate"
                     else:
-                        # USDT 감소 = 소각 신청
-                        db.add(BurnRequest(
-                            amount=abs(unexplained_change),
-                            tx_id="trade_burn",
-                            status="pending"
-                        ))
-                        change_type = "trade_burn"
-                    
-                    # 잔액 변화 기록
+                        # USDT 감소 = 소각 신청 (중복 체크 추가)
+                        recent_burn = db.query(BurnRequest).filter(
+                            BurnRequest.amount == abs(unexplained_change),
+                            BurnRequest.tx_id == "trade_burn",
+                            BurnRequest.status.in_(["pending", "approved"]),
+                            BurnRequest.created_at >= (now - timedelta(hours=1))
+                        ).first()
+                        
+                        if not recent_burn:
+                            db.add(BurnRequest(
+                                amount=abs(unexplained_change),
+                                tx_id="trade_burn",
+                                status="pending"
+                            ))
+                            logger.info(f"[BALANCE] 입출금 내역으로 설명되지 않는 소각 자동 생성: amount={abs(unexplained_change)}, tx_id=trade_burn")
+                            change_type = "trade_burn"
+                        else:
+                            logger.info(f"[BALANCE] 최근 1시간 내 동일한 trade_burn 소각 신청 존재: amount={abs(unexplained_change)}")
+                            change_type = "trade_burn_duplicate"
                     db.add(UpbitBalanceHistory(
                         usdt_balance=current_balance,
                         change_amount=unexplained_change,
                         change_type=change_type
                     ))
-                    
                     db.commit()
                     return {
                         "message": f"잔액 변화 감지: {unexplained_change:.6f} USDT",
                         "change_type": change_type,
                         "amount": abs(unexplained_change)
                     }
-        
-        # 최초 실행이거나 변화가 없는 경우
         db.add(UpbitBalanceHistory(
             usdt_balance=current_balance,
             change_amount=0,
             change_type="initial"
         ))
         db.commit()
+        logger.info("[BALANCE] 잔액 변화 없음 기록")
         return {"message": "잔액 변화 없음"}
-        
     except Exception as e:
         db.rollback()
+        logger.error(f"잔액 변화 감지 중 오류 발생: {str(e)}")
         raise HTTPException(status_code=500, detail=f"잔액 변화 감지 중 오류 발생: {str(e)}")
+
+@router.post("/poll-trades")
+def poll_trades(db: Session = Depends(get_db)):
+    """수동으로 거래 체결 폴링을 실행한다."""
+    try:
+        poll_upbit_trades_and_trigger_mint_burn(db)
+        return {"message": "거래 체결 폴링이 완료되었습니다."}
+    except Exception as e:
+        logger.error(f"거래 체결 폴링 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"거래 체결 폴링 중 오류 발생: {str(e)}")
+
+@router.get("/trade-sync-status")
+def get_trade_sync_status(db: Session = Depends(get_db)):
+    """거래 체결 동기화 상태를 조회한다."""
+    try:
+        sync_record = db.query(UpbitTradeSync).first()
+        if sync_record:
+            return {
+                "last_trade_uuid": sync_record.last_trade_uuid,
+                "last_checked_at": sync_record.last_checked_at
+            }
+        else:
+            return {
+                "last_trade_uuid": None,
+                "last_checked_at": None,
+                "message": "아직 동기화된 거래가 없습니다."
+            }
+    except Exception as e:
+        logger.error(f"거래 동기화 상태 조회 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"거래 동기화 상태 조회 중 오류 발생: {str(e)}")

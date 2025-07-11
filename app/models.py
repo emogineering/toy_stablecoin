@@ -1,10 +1,17 @@
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
 from dotenv import load_dotenv
 import logging
+
+# KST 타임존 설정
+KST = timezone(timedelta(hours=9))
+
+def get_kst_now():
+    """현재 시간을 KST로 반환"""
+    return datetime.now(KST)
 
 # 로깅 설정
 logger = logging.getLogger(__name__)
@@ -35,7 +42,7 @@ class MintRequest(Base):
     amount = Column(Float)
     tx_id = Column(String, index=True)  # 입금 트랜잭션 ID 추가
     status = Column(String, default="pending")  # pending, approved, rejected
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_kst_now)
 
 class BurnRequest(Base):
     __tablename__ = "burn_requests"
@@ -44,7 +51,7 @@ class BurnRequest(Base):
     amount = Column(Float)
     tx_id = Column(String, index=True)
     status = Column(String, default="pending")  # pending, approved, rejected
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_kst_now)
 
 class UpbitTransfer(Base):
     __tablename__ = "upbit_transfers"
@@ -64,7 +71,13 @@ class UpbitBalanceHistory(Base):
     usdt_balance = Column(Float)
     change_amount = Column(Float)
     change_type = Column(String)  # initial, trade_mint, trade_burn
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_kst_now)
+
+class UpbitTradeSync(Base):
+    __tablename__ = "upbit_trade_sync"
+    id = Column(Integer, primary_key=True, index=True)
+    last_trade_uuid = Column(String, index=True)
+    last_checked_at = Column(DateTime, default=get_kst_now)
 
 def get_db():
     """데이터베이스 세션을 안전하게 제공하는 함수"""

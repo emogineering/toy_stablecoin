@@ -40,7 +40,7 @@ function UserMintPage() {
         </div>
         <button type="submit">신청</button>
       </form>
-      {result && <div style={{ marginTop: 20, color: 'green' }}>신청 완료!<br/>ID: {result.id}<br/>Amount: {result.amount}<br/>Address: {result.eth_address}</div>}
+      {result && <div style={{ marginTop: 20, color: 'green' }}>신청 완료!<br/>Amount: {result.amount}<br/>Address: {result.eth_address}</div>}
       {error && <div style={{ marginTop: 20, color: 'red' }}>{error}</div>}
     </div>
   );

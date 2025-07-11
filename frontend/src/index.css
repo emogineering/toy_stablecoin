@@ -1,13 +1,40 @@
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  font-family: 'Inter', Arial, sans-serif;
+  font-size: 1.125rem; /* 18px */
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  color: #e5e5e5;
+  background: #000;
 }
 
-code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
-    monospace;
+.font-futuristic {
+  font-family: 'Orbitron', 'Arial', sans-serif;
+  letter-spacing: 0.04em;
+  font-size: 1.25rem; /* 20px */
+  font-weight: 500;
+}
+.font-main {
+  font-family: 'Inter', 'Arial', sans-serif;
+  font-size: 1.125rem; /* 18px */
+  font-weight: 400;
+}
+
+/* 네비게이션 스타일 (탭) */
+.tab-nav {
+  display: flex;
+  gap: 2.5rem;
+  font-family: 'Inter', Arial, sans-serif;
+  font-size: 1.25rem;
+  font-weight: 400;
+  color: #b3b3b3;
+  margin-bottom: 1.5rem;
+}
+.tab-nav .active {
+  color: #fff;
+  border-bottom: 2px solid #fff;
+  font-weight: 600;
 }

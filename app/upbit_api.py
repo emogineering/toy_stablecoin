@@ -145,7 +145,18 @@ def get_transfers():
             }
             for w in withdraws if isinstance(w, dict) and w.get("currency") == "USDT"
         ]
-        
+        logger.info(f"입금 내역: {deposit_list}")
+        logger.info(f"출금 내역: {withdraw_list}")
+        if not deposit_list:
+            logger.warning("업비트 API에서 입금 내역이 비어 있습니다.")
+        if not withdraw_list:
+            logger.warning("업비트 API에서 출금 내역이 비어 있습니다.")
+        for d in deposit_list:
+            if d["amount"] <= 0:
+                logger.warning(f"0 이하 금액의 입금 내역 감지: {d}")
+        for w in withdraw_list:
+            if w["amount"] <= 0:
+                logger.warning(f"0 이하 금액의 출금 내역 감지: {w}")
         logger.info(f"입출금 내역 조회 성공: 입금 {len(deposit_list)}건, 출금 {len(withdraw_list)}건")
         return deposit_list + withdraw_list
         
@@ -163,3 +174,46 @@ def get_transfers():
     except Exception as e:
         logger.error(f"입출금 내역 조회 중 예상치 못한 오류: {e}")
         raise Exception(f"입출금 내역 조회 실패: {e}") 
+
+def get_usdt_trades():
+    """USDT 마켓의 최근 체결(매수/매도) 내역을 조회한다."""
+    if not ACCESS_KEY or not SECRET_KEY:
+        raise Exception('API 키가 설정되어 있지 않습니다.')
+    try:
+        params = [
+            ("market", "KRW-USDT"),
+            ("state", "done"),
+            ("order_by", "desc"),
+            ("limit", 20)
+        ]
+        query_string = urllib.parse.urlencode(params)
+        m = hashlib.sha512()
+        m.update(query_string.encode())
+        query_hash = m.hexdigest()
+        payload = {
+            'access_key': ACCESS_KEY,
+            'nonce': str(uuid.uuid4()),
+            'query_hash': query_hash,
+            'query_hash_alg': 'SHA512',
+        }
+        jwt_token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+        headers = {"Authorization": f"Bearer {jwt_token}"}
+        url = f"{SERVER_URL}/v1/orders?{query_string}"
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        orders = resp.json()
+        # 주요 정보만 추출
+        trades = []
+        for o in orders:
+            if o.get("market") == "KRW-USDT" and o.get("state") == "done":
+                trades.append({
+                    "uuid": o["uuid"],
+                    "side": o["side"],  # bid(매수), ask(매도)
+                    "price": float(o["price"]),
+                    "volume": float(o["volume"]),
+                    "created_at": parse_datetime(o["created_at"]),
+                })
+        return trades
+    except Exception as e:
+        logger.error(f"USDT 체결 내역 조회 실패: {e}")
+        raise 
